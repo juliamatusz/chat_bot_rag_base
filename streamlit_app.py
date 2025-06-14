@@ -1,31 +1,91 @@
 import streamlit as st
-from openai import OpenAI
 import os
+import tempfile
 
-st.set_page_config(layout="wide", page_title="OpenRouter chatbot app")
-st.title("OpenRouter chatbot app")
+from docloader import load_documents_from_folder
+from embedder import create_index, retrieve_docs
+from chat_openrouter import ChatOpenRouter
+from langchain.prompts import ChatPromptTemplate
 
-# api_key, base_url = os.environ["API_KEY"], os.environ["BASE_URL"]
-api_key, base_url = st.secrets["API_KEY"], st.secrets["BASE_URL"]
-selected_model = "google/gemma-3-1b-it:free"
+st.markdown("### 🗳️ Znajdź kandydata, który myśli jak Ty")
+st.markdown("Porozmawiajmy o Twoich wartościach, a AI dopasuje odpowiednich kandydatów.")
 
+with st.sidebar:
+    st.title("Dodaj PDFy")
+    uploaded_files = st.file_uploader("Dodaj pliki PDF", type=["pdf"], accept_multiple_files=True)
+    if uploaded_files:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for uploaded_file in uploaded_files:
+                file_path = os.path.join(tmpdir, uploaded_file.name)
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.read())
+            documents = load_documents_from_folder(tmpdir)
+            st.session_state.documents = documents
+            st.session_state.index = create_index(documents)
+            st.success(f"Loaded and indexed {len(documents)} documents.")
+
+# Initialize chat history
 if "messages" not in st.session_state:
-    st.session_state["messages"] = [{"role": "assistant", "content": "How can I help you?."}]
+    st.session_state.messages = [{"role": "assistant", "content": "Porozmawiajmy o poglądach kandydatów!"}]
 
-for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).write(msg["content"])
+# Display chat messages from history on app rerun
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-if prompt := st.chat_input():
-    if not api_key:
-        st.info("Invalid API key.")
-        st.stop()
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    st.chat_message("user").write(prompt)
-    response = client.chat.completions.create(
-        model=selected_model,
-        messages=st.session_state.messages
-    )
-    msg = response.choices[0].message.content
-    st.session_state.messages.append({"role": "assistant", "content": msg})
-    st.chat_message("assistant").write(msg)
+template = """
+Na podstawie poniższego kontekstu odpowiedz na pytanie użytkownika, wskazując jednego lub więcej kandydatów, których programy są najbardziej zgodne z jego poglądami.
+
+- Nie twórz własnych cytatów.
+- Nie dodawaj słów w innych językach.
+- Pisz tylko po polsku.
+- Odpowiedzi mają być rzeczowe, maksymalnie 3–4 zdania.
+- Jeśli kontekst nie zawiera wystarczających danych – napisz: „Nie wiem”.
+
+Pytanie użytkownika:
+{question}
+
+Kontekst:
+{context}
+
+Odpowiedź:
+"""
+
+def answer_with_context(question, index, model):
+    top_docs = retrieve_docs(question, index)
+    context = "\n\n".join([doc["text"] for doc in top_docs])
+    prompt = ChatPromptTemplate.from_template(template)
+    chain = prompt | model
+    return chain.invoke({"question": question, "context": context})
+
+def extract_pure_text(response):
+    if isinstance(response, dict):
+        return response.get("content", str(response))
+    elif hasattr(response, "content"):
+        return response.content
+    else:
+        return str(response)
+
+if user_input := st.chat_input("Jakie poglądy są dla Ciebie kluczowe? Napisz np. „Popieram atom i swobodny dostęp do broni”"):
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        try:
+            if "index" in st.session_state:
+                response_to_clear = answer_with_context(
+                    user_input,
+                    st.session_state.index,
+                    ChatOpenRouter(model=st.secrets["MODEL"])
+                )
+                response = extract_pure_text(response_to_clear)
+            else:
+                response = "📄 Najpierw załaduj programy kandydatów w formacie PDF, aby móc dopasować odpowiedzi."
+            message_placeholder.markdown(response)
+        except Exception as e:
+            response = f"Error: {e}"
+            st.error(response)
+
+    st.session_state.messages.append({"role": "assistant", "content": response})
