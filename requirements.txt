@@ -1,2 +1,11 @@
-openai
 streamlit
+openai
+langchain
+langchain-community
+langchain-huggingface
+numpy
+langchain-openai
+faiss-cpu
+sentence-transformers
+PyPDF2
+nltk==3.8.1
